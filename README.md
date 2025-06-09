@@ -328,11 +328,118 @@ sudo cat /var/lib/jenkins/secrets/initialAdminPassword
 
 ### 3. 자격증명 설정
 
+Jenkins에서 CI/CD 파이프라인을 위한 필수 자격증명들을 설정합니다.
+
+#### 3.1 Docker Hub 자격증명 추가
+
 ```bash
-# Jenkins 관리 → 자격증명 → 글로벌 자격증명
-# 1. Docker Hub 자격증명 추가
-# 2. GitHub SSH 키 추가
-# 3. EC2 SSH 키 추가
+# 1. Jenkins 웹 인터페이스에서 다음 경로로 이동
+Jenkins 관리 → 자격증명 → 시스템 → 글로벌 자격증명 (unrestricted) → 자격증명 추가
+
+# 2. 다음 정보 입력:
+Kind: Username with password
+Scope: Global (Jenkins, nodes, items, all child items, etc)
+Username: [Docker Hub 사용자명]
+Password: [Docker Hub 패스워드 또는 Access Token]
+ID: dockerhub-credentials
+Description: Docker Hub Credentials for Image Push/Pull
+```
+
+**💡 보안 팁**: Docker Hub 패스워드 대신 **Access Token** 사용 권장
+
+```bash
+# Docker Hub Access Token 생성 방법:
+# 1. Docker Hub 로그인 → Account Settings → Security
+# 2. New Access Token 클릭
+# 3. Token Description 입력 후 Generate
+# 4. 생성된 토큰을 Jenkins 패스워드 필드에 입력
+```
+
+#### 3.2 GitHub SSH 키 추가
+
+```bash
+# 1. SSH 키가 없다면 생성
+ssh-keygen -t rsa -b 4096 -C "jenkins@your-domain.com" -f ~/.ssh/github_rsa
+
+# 2. 공개키를 GitHub에 등록
+cat ~/.ssh/github_rsa.pub
+# GitHub → Settings → SSH and GPG keys → New SSH key에 등록
+
+# 3. Jenkins에서 자격증명 추가
+Jenkins 관리 → 자격증명 → 시스템 → 글로벌 자격증명 → 자격증명 추가
+
+# 4. 다음 정보 입력:
+Kind: SSH Username with private key
+Scope: Global
+ID: github-ssh-key
+Description: GitHub SSH Key for Repository Access
+Username: git
+Private Key: Enter directly
+Key: [~/.ssh/github_rsa 파일 내용 복사/붙여넣기]
+Passphrase: [SSH 키 생성시 입력한 passphrase, 없으면 비워둠]
+```
+
+#### 3.3 EC2 SSH 키 추가
+
+```bash
+# 1. EC2 접속용 SSH 키 확인 (Terraform으로 생성한 키)
+cat ~/.ssh/id_rsa  # terraform.tfvars에 입력한 키와 쌍을 이루는 private key
+
+# 2. Jenkins에서 자격증명 추가
+Jenkins 관리 → 자격증명 → 시스템 → 글로벌 자격증명 → 자격증명 추가
+
+# 3. 다음 정보 입력:
+Kind: SSH Username with private key
+Scope: Global
+ID: ec2-ssh-key
+Description: EC2 SSH Key for Deployment
+Username: ec2-user
+Private Key: Enter directly
+Key: [~/.ssh/id_rsa 파일 내용 복사/붙여넣기]
+Passphrase: [SSH 키 생성시 입력한 passphrase, 없으면 비워둠]
+```
+
+#### 3.4 자격증명 설정 확인
+
+```bash
+# Jenkins에서 설정된 자격증명 확인
+Jenkins 관리 → 자격증명 → 시스템 → 글로벌 자격증명
+
+# 다음 3개 자격증명이 있어야 함:
+┌─────────────────────┬──────────────────────┬─────────────────────────┐
+│ ID                  │ Name                 │ Kind                    │
+├─────────────────────┼──────────────────────┼─────────────────────────┤
+│ dockerhub-credentials│ Docker Hub Credentials│ Username with password  │
+│ github-ssh-key      │ GitHub SSH Key       │ SSH Username with key   │
+│ ec2-ssh-key         │ EC2 SSH Key          │ SSH Username with key   │
+└─────────────────────┴──────────────────────┴─────────────────────────┘
+```
+
+#### 3.5 자격증명 테스트
+
+**Docker Hub 연결 테스트:**
+
+```bash
+# Jenkins 서버에서 직접 테스트
+make ssh-jenkins
+docker login -u [username] -p [token]
+# Login Succeeded 메시지 확인
+```
+
+**GitHub SSH 연결 테스트:**
+
+```bash
+# Jenkins 서버에서 테스트
+ssh -T git@github.com -i ~/.ssh/github_rsa
+# "Hi username! You've successfully authenticated..." 메시지 확인
+```
+
+**EC2 SSH 연결 테스트:**
+
+```bash
+# Jenkins 서버에서 애플리케이션 서버로 연결 테스트
+ssh -i ~/.ssh/id_rsa ec2-user@<app-server-ip>
+# 성공적으로 접속되는지 확인
 ```
 
 ## 🚀 Spring Boot 프로젝트 연동
@@ -368,11 +475,69 @@ ENTRYPOINT ["java", \
 
 ### 3. Jenkins Job 생성
 
+#### 3.1 애플리케이션 서버 IP 확인
+
 ```bash
-# 1. New Item → Pipeline 선택
-# 2. Pipeline from SCM 선택
-# 3. Git 저장소 URL 입력
-# 4. Jenkinsfile 경로 설정: jenkins/Jenkinsfile.example
+# Terraform 출력에서 애플리케이션 서버 IP 확인
+make output
+# 또는
+terraform output app_public_ip
+```
+
+#### 3.2 Jenkins 파이프라인 Job 생성
+
+```bash
+# 1. Jenkins 메인 페이지에서 "새로운 Item" 클릭
+# 2. 항목 이름 입력: "springboot-cicd-pipeline"
+# 3. "Pipeline" 선택 후 OK 클릭
+
+# 4. 파이프라인 설정:
+General:
+  ✅ GitHub project
+  Project url: https://github.com/your-username/your-spring-boot-repo
+
+Build Triggers:
+  ✅ GitHub hook trigger for GITScm polling
+
+Pipeline:
+  Definition: Pipeline script from SCM
+  SCM: Git
+  Repository URL: https://github.com/your-username/your-spring-boot-repo.git
+  Credentials: github-ssh-key (위에서 생성한 자격증명)
+  Branch: */main (또는 원하는 브랜치)
+  Script Path: Jenkinsfile (또는 jenkins/Jenkinsfile.example)
+```
+
+#### 3.3 파이프라인 환경 변수 설정
+
+```bash
+# Jenkinsfile에서 다음 변수들을 실제 값으로 수정:
+
+environment {
+    DOCKER_REGISTRY = 'your-dockerhub-username'        # 실제 Docker Hub 사용자명
+    IMAGE_NAME = 'springboot-cicd-app'                  # 원하는 이미지 이름
+    APP_SERVER_IP = '3.35.123.456'                     # terraform output에서 확인한 IP
+    APP_SERVER_USER = 'ec2-user'                       # 그대로 유지
+    DOCKER_CREDENTIALS_ID = 'dockerhub-credentials'    # 그대로 유지
+    SSH_CREDENTIALS_ID = 'ec2-ssh-key'                 # 그대로 유지
+}
+```
+
+#### 3.4 첫 번째 빌드 실행
+
+```bash
+# 1. Jenkins Job 페이지에서 "Build Now" 클릭
+# 2. 빌드 히스토리에서 진행 상황 확인
+# 3. Console Output에서 로그 확인
+
+# 예상 파이프라인 단계:
+[✓] Checkout          - 소스 코드 체크아웃
+[✓] Test              - 단위 테스트 실행
+[✓] Build             - Maven/Gradle 빌드
+[✓] Docker Build      - Docker 이미지 생성
+[✓] Docker Push       - Docker Hub에 이미지 푸시
+[✓] Deploy            - 애플리케이션 서버에 배포
+[✓] Health Check      - 배포 후 헬스체크
 ```
 
 ## 🌍 환경별 배포 가이드
@@ -457,6 +622,28 @@ sudo systemctl restart jenkins
 
 # 만약 여전히 Java 11을 사용한다면
 sudo alternatives --config java  # Java 17 선택
+```
+
+#### Jenkins 자격증명 관련 오류
+
+```bash
+# 오류: docker login 실패 또는 "invalid credentials"
+# 해결: Docker Hub 자격증명 확인 및 재설정
+# 1. Docker Hub에서 Access Token 재생성
+# 2. Jenkins에서 자격증명 업데이트
+# 3. 연결 테스트: docker login -u username -p token
+
+# 오류: SSH 키 인증 실패 "Permission denied (publickey)"
+# 해결: SSH 키 포맷 및 권한 확인
+# 1. SSH 키가 올바른 형식인지 확인 (-----BEGIN OPENSSH PRIVATE KEY-----)
+# 2. Passphrase가 정확한지 확인
+# 3. GitHub/EC2에 공개키가 등록되었는지 확인
+
+# 오류: Git clone 실패 "Repository not found" 또는 "Access denied"
+# 해결: GitHub SSH 키 및 저장소 권한 확인
+# 1. GitHub에 SSH 키가 올바르게 등록되었는지 확인
+# 2. 저장소가 Public이거나 SSH 키에 접근 권한이 있는지 확인
+# 3. Jenkins에서 git 사용자명으로 자격증명 설정했는지 확인
 ```
 
 ## 📈 확장 및 최적화
