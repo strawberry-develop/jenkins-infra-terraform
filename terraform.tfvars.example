@@ -1,0 +1,30 @@
+# 기본 설정
+aws_region   = "ap-northeast-2"
+project_name = "springboot-cicd"
+environment  = "dev"
+owner        = "devops-team"
+
+# 네트워크 설정
+vpc_cidr = "10.0.0.0/16"
+
+# EC2 설정
+instance_type = "t3.medium"
+
+# SSH 공개 키 (필수 - 본인의 SSH 공개 키로 교체 필요)
+# ssh-keygen -t rsa -b 4096 -C "your-email@example.com" 로 생성 가능
+public_key = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQC... your-public-key-here"
+
+# 스토리지 설정
+jenkins_volume_size = 30  # Jenkins 서버 디스크 크기 (GB)
+app_volume_size     = 20  # 애플리케이션 서버 디스크 크기 (GB)
+
+# 보안 설정 (프로덕션에서는 특정 IP로 제한 권장)
+allowed_cidr_blocks     = ["0.0.0.0/0"]  # Jenkins 웹 접근 허용 IP
+ssh_allowed_cidr_blocks = ["0.0.0.0/0"]  # SSH 접근 허용 IP
+
+# 추가 태그
+additional_tags = {
+  Team        = "DevOps"
+  Cost-Center = "Engineering"
+  Application = "SpringBoot-CICD"
+} 

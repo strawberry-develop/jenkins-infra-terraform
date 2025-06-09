@@ -1,0 +1,200 @@
+pipeline {
+    agent any
+    
+    environment {
+        // Docker Hub 또는 ECR 설정
+        DOCKER_REGISTRY = 'your-dockerhub-username'
+        IMAGE_NAME = 'springboot-cicd-app'
+        
+        // 애플리케이션 서버 정보 (Terraform output에서 가져오기)
+        APP_SERVER_IP = 'your-app-server-ip'
+        APP_SERVER_USER = 'ec2-user'
+        
+        // Docker Hub 자격 증명 ID (Jenkins Credentials에서 설정)
+        DOCKER_CREDENTIALS_ID = 'dockerhub-credentials'
+        
+        // SSH 키 자격 증명 ID (Jenkins Credentials에서 설정)
+        SSH_CREDENTIALS_ID = 'ec2-ssh-key'
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                echo 'Checking out source code...'
+                checkout scm
+            }
+        }
+        
+        stage('Test') {
+            steps {
+                echo 'Running tests...'
+                script {
+                    if (fileExists('mvnw')) {
+                        sh './mvnw clean test'
+                    } else {
+                        sh 'mvn clean test'
+                    }
+                }
+            }
+            post {
+                always {
+                    // 테스트 결과 발행
+                    publishTestResults testResultsPattern: 'target/surefire-reports/*.xml'
+                }
+            }
+        }
+        
+        stage('Build') {
+            steps {
+                echo 'Building application...'
+                script {
+                    if (fileExists('mvnw')) {
+                        sh './mvnw clean package -DskipTests'
+                    } else {
+                        sh 'mvn clean package -DskipTests'
+                    }
+                }
+            }
+        }
+        
+        stage('Docker Build') {
+            steps {
+                echo 'Building Docker image...'
+                script {
+                    def imageTag = "${BUILD_NUMBER}"
+                    def imageName = "${DOCKER_REGISTRY}/${IMAGE_NAME}"
+                    
+                    // Docker 이미지 빌드
+                    def dockerImage = docker.build("${imageName}:${imageTag}")
+                    
+                    // latest 태그도 생성
+                    sh "docker tag ${imageName}:${imageTag} ${imageName}:latest"
+                    
+                    // 환경 변수에 이미지 이름 저장
+                    env.DOCKER_IMAGE = "${imageName}:${imageTag}"
+                    env.DOCKER_IMAGE_LATEST = "${imageName}:latest"
+                }
+            }
+        }
+        
+        stage('Docker Push') {
+            steps {
+                echo 'Pushing Docker image to registry...'
+                script {
+                    docker.withRegistry('https://index.docker.io/v1/', DOCKER_CREDENTIALS_ID) {
+                        // 빌드 번호 태그 푸시
+                        sh "docker push ${env.DOCKER_IMAGE}"
+                        // latest 태그 푸시
+                        sh "docker push ${env.DOCKER_IMAGE_LATEST}"
+                    }
+                }
+            }
+        }
+        
+        stage('Deploy to App Server') {
+            steps {
+                echo 'Deploying to application server...'
+                script {
+                    sshagent(credentials: [SSH_CREDENTIALS_ID]) {
+                        // 애플리케이션 서버에 배포 스크립트 실행
+                        sh """
+                            ssh -o StrictHostKeyChecking=no ${APP_SERVER_USER}@${APP_SERVER_IP} '
+                                # Docker 이미지 pull
+                                docker pull ${env.DOCKER_IMAGE_LATEST}
+                                
+                                # 기존 컨테이너 중지 및 제거
+                                docker stop springboot-app-container || true
+                                docker rm springboot-app-container || true
+                                
+                                # 새 컨테이너 실행
+                                docker run -d \\
+                                    --name springboot-app-container \\
+                                    --restart unless-stopped \\
+                                    -p 8080:8080 \\
+                                    -v /var/log/springboot:/app/logs \\
+                                    ${env.DOCKER_IMAGE_LATEST}
+                                
+                                # 컨테이너 상태 확인
+                                sleep 10
+                                docker ps | grep springboot-app-container
+                            '
+                        """
+                    }
+                }
+            }
+        }
+        
+        stage('Health Check') {
+            steps {
+                echo 'Performing health check...'
+                script {
+                    def maxRetries = 30
+                    def retryCount = 0
+                    def healthCheckUrl = "http://${APP_SERVER_IP}:8080/actuator/health"
+                    
+                    while (retryCount < maxRetries) {
+                        try {
+                            def response = sh(
+                                script: "curl -f -s ${healthCheckUrl}",
+                                returnStatus: true
+                            )
+                            
+                            if (response == 0) {
+                                echo "✅ Application is healthy!"
+                                break
+                            } else {
+                                retryCount++
+                                echo "⏳ Waiting for application to start... (${retryCount}/${maxRetries})"
+                                sleep(10)
+                            }
+                        } catch (Exception e) {
+                            retryCount++
+                            echo "⏳ Health check failed, retrying... (${retryCount}/${maxRetries})"
+                            sleep(10)
+                        }
+                    }
+                    
+                    if (retryCount >= maxRetries) {
+                        error("❌ Health check failed after ${maxRetries} attempts")
+                    }
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            echo 'Pipeline execution completed.'
+            
+            // 로컬 Docker 이미지 정리 (옵션)
+            sh 'docker system prune -f'
+        }
+        
+        success {
+            echo '🎉 Deployment successful!'
+            
+            // 성공 알림 (Slack, 이메일 등)
+            // slackSend(
+            //     channel: '#deployments',
+            //     color: 'good',
+            //     message: "✅ Deployment successful: ${env.JOB_NAME} #${env.BUILD_NUMBER}"
+            // )
+        }
+        
+        failure {
+            echo '❌ Deployment failed!'
+            
+            // 실패 알림
+            // slackSend(
+            //     channel: '#deployments',
+            //     color: 'danger',
+            //     message: "❌ Deployment failed: ${env.JOB_NAME} #${env.BUILD_NUMBER}"
+            // )
+        }
+        
+        cleanup {
+            // 워크스페이스 정리
+            cleanWs()
+        }
+    }
+} 
