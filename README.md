@@ -65,13 +65,13 @@ graph TB
 
 ## 📋 구성 요소
 
-| **구성 요소**          | **설명**                           | **포트**        |
-| ---------------------- | ---------------------------------- | --------------- |
-| **Jenkins Server**     | CI/CD 파이프라인 실행, Docker 빌드 | 8080, 50000, 22 |
-| **Application Server** | Spring Boot 애플리케이션 실행      | 8080, 80, 22    |
-| **VPC & Subnets**      | 네트워크 격리 및 가용성 확보       | 10.0.0.0/16     |
-| **Security Groups**    | 최소 권한 원칙의 방화벽 규칙       | 계층별 보안     |
-| **SSH Key Pairs**      | 안전한 서버 접근 관리              | RSA 4096bit     |
+| **구성 요소**          | **설명**                                                     | **포트**        |
+| ---------------------- | ------------------------------------------------------------ | --------------- |
+| **Jenkins Server**     | CI/CD 파이프라인 실행, Docker 빌드<br/>Java 17 + Jenkins LTS | 8080, 50000, 22 |
+| **Application Server** | Spring Boot 애플리케이션 실행<br/>Java 17 + Docker Runtime   | 8080, 80, 22    |
+| **VPC & Subnets**      | 네트워크 격리 및 가용성 확보                                 | 10.0.0.0/16     |
+| **Security Groups**    | 최소 권한 원칙의 방화벽 규칙                                 | 계층별 보안     |
+| **SSH Key Pairs**      | 안전한 서버 접근 관리                                        | RSA 4096bit     |
 
 ## 🔗 CI/CD 파이프라인 흐름
 
@@ -340,7 +340,7 @@ sudo cat /var/lib/jenkins/secrets/initialAdminPassword
 ### 1. Spring Boot 프로젝트에 Dockerfile 추가
 
 ```dockerfile
-FROM openjdk:11-jre-slim
+FROM openjdk:17-jre-slim
 
 WORKDIR /app
 
@@ -348,7 +348,13 @@ COPY target/*.jar app.jar
 
 EXPOSE 8080
 
-ENTRYPOINT ["java", "-jar", "app.jar"]
+# Java 17을 위한 최적화된 JVM 옵션
+ENTRYPOINT ["java", \
+    "-Xms512m", \
+    "-Xmx1024m", \
+    "-XX:+UseG1GC", \
+    "-XX:+UseContainerSupport", \
+    "-jar", "app.jar"]
 ```
 
 ### 2. GitHub 웹훅 설정
@@ -438,6 +444,19 @@ sudo journalctl -u jenkins -f
 # 해결: 사용자를 docker 그룹에 추가
 sudo usermod -aG docker $USER
 sudo systemctl restart docker
+```
+
+#### Jenkins Java 버전 오류
+
+```bash
+# 오류: Running with Java 11, which is older than the minimum required version (Java 17)
+# 해결: Java 17이 올바르게 설치되었는지 확인
+make ssh-jenkins
+java -version  # Java 17 확인
+sudo systemctl restart jenkins
+
+# 만약 여전히 Java 11을 사용한다면
+sudo alternatives --config java  # Java 17 선택
 ```
 
 ## 📈 확장 및 최적화

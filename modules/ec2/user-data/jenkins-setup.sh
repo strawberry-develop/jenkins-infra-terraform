@@ -18,7 +18,7 @@ yum install -y \
     wget \
     curl \
     unzip \
-    java-11-amazon-corretto \
+    java-17-amazon-corretto \
     htop \
     tree
 
@@ -64,14 +64,14 @@ chown -R jenkins:jenkins /opt/maven
 
 # 환경 변수 설정
 cat >> /etc/environment << EOF
-JAVA_HOME=/usr/lib/jvm/java-11-amazon-corretto
+JAVA_HOME=/usr/lib/jvm/java-17-amazon-corretto
 MAVEN_HOME=/opt/maven
 PATH=$JAVA_HOME/bin:$MAVEN_HOME/bin:$PATH
 EOF
 
 # Jenkins 사용자를 위한 환경 변수 설정
 cat >> /var/lib/jenkins/.bashrc << EOF
-export JAVA_HOME=/usr/lib/jvm/java-11-amazon-corretto
+export JAVA_HOME=/usr/lib/jvm/java-17-amazon-corretto
 export MAVEN_HOME=/opt/maven
 export PATH=$JAVA_HOME/bin:$MAVEN_HOME/bin:$PATH
 EOF

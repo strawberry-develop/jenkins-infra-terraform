@@ -2,6 +2,9 @@ pipeline {
     agent any
     
     environment {
+        // Java 17 설정
+        JAVA_HOME = '/usr/lib/jvm/java-17-amazon-corretto'
+        
         // Docker Hub 또는 ECR 설정
         DOCKER_REGISTRY = 'your-dockerhub-username'
         IMAGE_NAME = 'springboot-cicd-app'

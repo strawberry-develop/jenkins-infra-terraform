@@ -18,7 +18,7 @@ yum install -y \
     wget \
     curl \
     unzip \
-    java-11-amazon-corretto \
+    java-17-amazon-corretto \
     htop \
     tree \
     nc
@@ -40,7 +40,7 @@ chmod +x /usr/local/bin/docker-compose
 
 # 환경 변수 설정
 cat >> /etc/environment << EOF
-JAVA_HOME=/usr/lib/jvm/java-11-amazon-corretto
+JAVA_HOME=/usr/lib/jvm/java-17-amazon-corretto
 PATH=$JAVA_HOME/bin:$PATH
 EOF
 
