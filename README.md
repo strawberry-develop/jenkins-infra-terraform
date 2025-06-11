@@ -145,7 +145,7 @@ cat ~/.ssh/id_rsa.pub
 
 ```bash
 # 저장소 클론 (실제 사용시)
-git clone <your-repo-url>
+git clone https://github.com/dev-thug/jenkins-infra-terraform.git
 cd infra
 
 # 설정 파일 생성
