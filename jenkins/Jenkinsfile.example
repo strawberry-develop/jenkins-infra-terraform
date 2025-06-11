@@ -5,26 +5,30 @@ pipeline {
         // Java 17 설정
         JAVA_HOME = '/usr/lib/jvm/java-17-amazon-corretto'
         
-        // Docker Hub 또는 ECR 설정
+        // Docker Hub 설정 (실제 값으로 변경 필요)
         DOCKER_REGISTRY = 'your-dockerhub-username'
-        IMAGE_NAME = 'springboot-cicd-app'
+        IMAGE_NAME = 'your-dockerhub-repository-name'
         
-        // 애플리케이션 서버 정보 (Terraform output에서 가져오기)
-        APP_SERVER_IP = 'your-app-server-ip'
+        // 애플리케이션 서버 정보 (terraform output에서 확인)
+        APP_SERVER_NAME = 'app-server'  // Publish over SSH에서 설정한 서버 이름
+        APP_SERVER_IP = 'your-app-server-ip'  // terraform output app_public_ip와 일치
         APP_SERVER_USER = 'ec2-user'
         
-        // Docker Hub 자격 증명 ID (Jenkins Credentials에서 설정)
-        DOCKER_CREDENTIALS_ID = 'dockerhub-credentials'
-        
-        // SSH 키 자격 증명 ID (Jenkins Credentials에서 설정)
-        SSH_CREDENTIALS_ID = 'ec2-ssh-key'
+        // Jenkins Credentials ID (Jenkins에서 설정한 ID와 일치해야 함)
+        GITHUB_CREDENTIALS_ID = 'github-credentials'        // GitHub Personal Access Token
+        DOCKER_CREDENTIALS_ID = 'dockerhub-credentials'  // Docker Hub 자격증명
+        SSH_CREDENTIALS_ID = 'ec2-ssh-key'              // EC2 SSH 키
     }
     
-    stages {
-        stage('Checkout') {
+   
+   stages {
+        stage('Clone') {
             steps {
-                echo 'Checking out source code...'
-                checkout scm
+                echo 'Cloning source code from GitHub...'
+                // ✅ Credential을 명시적으로 지정
+                git branch: 'main',
+                    credentialsId: "${GITHUB_CREDENTIALS_ID}",
+                    url: 'https://github.com/strawberry-develop/todo-spring-boot.git'
             }
         }
         
@@ -32,17 +36,23 @@ pipeline {
             steps {
                 echo 'Running tests...'
                 script {
-                    if (fileExists('mvnw')) {
-                        sh './mvnw clean test'
-                    } else {
-                        sh 'mvn clean test'
-                    }
+                    // Gradle wrapper 실행 권한 부여
+                    sh 'chmod +x ./gradlew'
+                    
+                    // 테스트 실행
+                    sh './gradlew clean test'
                 }
             }
             post {
                 always {
-                    // 테스트 결과 발행
-                    publishTestResults testResultsPattern: 'target/surefire-reports/*.xml'
+                    // 테스트 결과 발행 (Gradle 기준)
+                    script {
+                        if (fileExists('build/test-results/test/*.xml')) {
+                            junit 'build/test-results/test/*.xml'
+                        } else {
+                            echo '⚠️ No test results found in build/test-results/test/'
+                        }
+                    }
                 }
             }
         }
@@ -51,11 +61,11 @@ pipeline {
             steps {
                 echo 'Building application...'
                 script {
-                    if (fileExists('mvnw')) {
-                        sh './mvnw clean package -DskipTests'
-                    } else {
-                        sh 'mvn clean package -DskipTests'
-                    }
+                    // JAR 파일 빌드
+                    sh './gradlew clean bootJar'
+                    
+                    // 빌드된 JAR 파일 확인
+                    sh 'ls -la build/libs/'
                 }
             }
         }
@@ -67,100 +77,300 @@ pipeline {
                     def imageTag = "${BUILD_NUMBER}"
                     def imageName = "${DOCKER_REGISTRY}/${IMAGE_NAME}"
                     
-                    // Docker 이미지 빌드
-                    def dockerImage = docker.build("${imageName}:${imageTag}")
+                    // JAR 파일 확인
+                    sh 'ls -la build/libs/'
                     
-                    // latest 태그도 생성
-                    sh "docker tag ${imageName}:${imageTag} ${imageName}:latest"
+                    // 정확한 JAR 파일명 찾기 (plain JAR 제외)
+                    def jarFile = sh(
+                        script: "find build/libs -name '*.jar' -not -name '*-plain.jar' | head -1",
+                        returnStdout: true
+                    ).trim()
                     
-                    // 환경 변수에 이미지 이름 저장
-                    env.DOCKER_IMAGE = "${imageName}:${imageTag}"
-                    env.DOCKER_IMAGE_LATEST = "${imageName}:latest"
+                    echo "Found JAR file: ${jarFile}"
+                    
+                    if (!jarFile) {
+                        error("No executable JAR file found in build/libs/")
+                    }
+                    
+                    // Dockerfile 확인 및 생성
+                    if (fileExists('Dockerfile')) {
+                        echo "✅ Using existing Dockerfile"
+                        sh 'cat Dockerfile'
+                    } else {
+                        echo "📝 Creating new Dockerfile"
+                        sh """
+                        cat > Dockerfile << 'EOF'
+FROM eclipse-temurin:17-jre-alpine
+
+# 필요한 패키지 설치 (curl for health check)
+RUN apk add --no-cache curl
+
+WORKDIR /app
+
+# JAR 파일을 컨테이너로 복사
+COPY ${jarFile} app.jar
+
+# 포트 노출
+EXPOSE 8080
+
+# 헬스체크 추가
+HEALTHCHECK --interval=30s --timeout=3s --start-period=30s --retries=3 \\
+    CMD curl -f http://localhost:8080/actuator/health || exit 1
+
+# Java 17을 위한 최적화된 JVM 옵션
+ENTRYPOINT ["java", \\
+    "-Xms512m", \\
+    "-Xmx1024m", \\
+    "-XX:+UseG1GC", \\
+    "-XX:+UseContainerSupport", \\
+    "-Djava.security.egd=file:/dev/./urandom", \\
+    "-jar", "app.jar"]
+EOF
+                        """
+                    }
+                    
+                    // Docker 이미지 빌드 (에러 처리 강화)
+                    try {
+                        sh "docker build -t ${imageName}:${imageTag} ."
+                        sh "docker tag ${imageName}:${imageTag} ${imageName}:latest"
+                        
+                        // 환경 변수에 이미지 이름 저장
+                        env.DOCKER_IMAGE = "${imageName}:${imageTag}"
+                        env.DOCKER_IMAGE_LATEST = "${imageName}:latest"
+                        
+                        echo "✅ Docker image built successfully: ${env.DOCKER_IMAGE_LATEST}"
+                    } catch (Exception e) {
+                        echo "❌ Docker build failed: ${e.getMessage()}"
+                        sh 'cat Dockerfile'  // Dockerfile 내용 출력
+                        throw e
+                    }
                 }
             }
         }
         
         stage('Docker Push') {
             steps {
-                echo 'Pushing Docker image to registry...'
+                echo 'Pushing Docker image to Docker Hub...'
                 script {
-                    docker.withRegistry('https://index.docker.io/v1/', DOCKER_CREDENTIALS_ID) {
-                        // 빌드 번호 태그 푸시
-                        sh "docker push ${env.DOCKER_IMAGE}"
-                        // latest 태그 푸시
-                        sh "docker push ${env.DOCKER_IMAGE_LATEST}"
-                    }
-                }
-            }
-        }
-        
-        stage('Deploy to App Server') {
-            steps {
-                echo 'Deploying to application server...'
-                script {
-                    sshagent(credentials: [SSH_CREDENTIALS_ID]) {
-                        // 애플리케이션 서버에 배포 스크립트 실행
+                    // ✅ withCredentials를 사용한 안정적인 Docker Hub 로그인
+                    withCredentials([usernamePassword(
+                        credentialsId: "${DOCKER_CREDENTIALS_ID}",
+                        usernameVariable: 'DOCKER_USER',
+                        passwordVariable: 'DOCKER_PASS'
+                    )]) {
+                        // Docker Hub 로그인
+                        sh '''
+                            echo "🔐 Docker Hub 로그인 시도..."
+                            echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+                            echo "✅ Docker Hub 로그인 성공!"
+                        '''
+                        
+                        // 이미지 정보 확인
                         sh """
-                            ssh -o StrictHostKeyChecking=no ${APP_SERVER_USER}@${APP_SERVER_IP} '
-                                # Docker 이미지 pull
-                                docker pull ${env.DOCKER_IMAGE_LATEST}
-                                
-                                # 기존 컨테이너 중지 및 제거
-                                docker stop springboot-app-container || true
-                                docker rm springboot-app-container || true
-                                
-                                # 새 컨테이너 실행
-                                docker run -d \\
-                                    --name springboot-app-container \\
-                                    --restart unless-stopped \\
-                                    -p 8080:8080 \\
-                                    -v /var/log/springboot:/app/logs \\
-                                    ${env.DOCKER_IMAGE_LATEST}
-                                
-                                # 컨테이너 상태 확인
-                                sleep 10
-                                docker ps | grep springboot-app-container
-                            '
+                            echo "📋 푸시할 이미지 정보:"
+                            echo "  - Tagged: ${env.DOCKER_IMAGE}"
+                            echo "  - Latest: ${env.DOCKER_IMAGE_LATEST}"
+                            docker images | grep "${DOCKER_REGISTRY}/${IMAGE_NAME}" || echo "이미지를 찾을 수 없습니다"
                         """
+                        
+                        // Docker 이미지 푸시
+                        sh """
+                            echo "📤 Docker 이미지 푸시 시작..."
+                            
+                            echo "  ➤ 태그된 이미지 푸시: ${env.DOCKER_IMAGE}"
+                            docker push ${env.DOCKER_IMAGE}
+                            
+                            echo "  ➤ Latest 이미지 푸시: ${env.DOCKER_IMAGE_LATEST}"
+                            docker push ${env.DOCKER_IMAGE_LATEST}
+                            
+                            echo "✅ Docker 이미지 푸시 완료!"
+                        """
+                        
+                        // Docker Hub 로그아웃 (보안)
+                        sh 'docker logout'
                     }
                 }
             }
         }
         
-        stage('Health Check') {
+        stage('Deploy with Publish over SSH') {
             steps {
-                echo 'Performing health check...'
+                echo 'Deploying to application server using Publish over SSH...'
+                
                 script {
-                    def maxRetries = 30
-                    def retryCount = 0
-                    def healthCheckUrl = "http://${APP_SERVER_IP}:8080/actuator/health"
-                    
-                    while (retryCount < maxRetries) {
-                        try {
-                            def response = sh(
-                                script: "curl -f -s ${healthCheckUrl}",
-                                returnStatus: true
-                            )
-                            
-                            if (response == 0) {
-                                echo "✅ Application is healthy!"
-                                break
-                            } else {
-                                retryCount++
-                                echo "⏳ Waiting for application to start... (${retryCount}/${maxRetries})"
-                                sleep(10)
-                            }
-                        } catch (Exception e) {
-                            retryCount++
-                            echo "⏳ Health check failed, retrying... (${retryCount}/${maxRetries})"
-                            sleep(10)
-                        }
-                    }
-                    
-                    if (retryCount >= maxRetries) {
-                        error("❌ Health check failed after ${maxRetries} attempts")
+                    // Docker Hub 자격증명을 포함한 배포 스크립트 생성
+                    withCredentials([usernamePassword(
+                        credentialsId: "${DOCKER_CREDENTIALS_ID}",
+                        usernameVariable: 'DOCKER_USER',
+                        passwordVariable: 'DOCKER_PASS'
+                    )]) {
+                        
+                        writeFile file: 'deploy.sh', text: """#!/bin/bash
+set -e
+
+echo "🚀 Starting deployment of ${env.DOCKER_IMAGE_LATEST}..."
+
+echo "🔐 Docker Hub 로그인..."
+echo "${DOCKER_PASS}" | docker login -u "${DOCKER_USER}" --password-stdin
+echo "✅ Docker Hub 로그인 성공!"
+
+echo "=== Docker Hub에서 최신 이미지 pull ==="
+docker pull ${env.DOCKER_IMAGE_LATEST}
+
+echo "=== 기존 컨테이너 중지 및 제거 ==="
+docker stop todo-app-container 2>/dev/null || echo "No running container to stop"
+docker rm todo-app-container 2>/dev/null || echo "No container to remove"
+
+echo "=== 새 컨테이너 실행 ==="
+docker run -d \\
+    --name todo-app-container \\
+    --restart unless-stopped \\
+    -p 8080:8080 \\
+    -v /var/log/todo-app:/app/logs \\
+    ${env.DOCKER_IMAGE_LATEST}
+
+echo "⏳ 컨테이너 시작 대기 (10초)..."
+sleep 10
+
+echo "=== 컨테이너 상태 확인 ==="
+docker ps | grep todo-app-container
+
+echo "=== 컨테이너 로그 확인 (마지막 20줄) ==="
+docker logs --tail 20 todo-app-container
+
+echo "=== 사용하지 않는 Docker 이미지 정리 ==="
+docker image prune -f
+
+echo "🔒 Docker Hub 로그아웃 (보안)"
+docker logout
+
+echo "✅ 배포 완료!"
+"""
+                        
+                        // Publish over SSH로 배포 스크립트 전송 및 실행
+                        sshPublisher(
+                            publishers: [
+                                sshPublisherDesc(
+                                    configName: env.APP_SERVER_NAME,
+                                    verbose: true,
+                                    transfers: [
+                                        sshTransfer(
+                                            sourceFiles: 'deploy.sh',
+                                            removePrefix: '',
+                                            remoteDirectory: '',
+                                            execCommand: 'chmod +x deploy.sh && ./deploy.sh'
+                                        )
+                                    ]
+                                )
+                            ]
+                        )
                     }
                 }
+            }
+        }
+        
+        stage('Health Check with Publish over SSH') {
+            steps {
+                echo 'Checking application health using Publish over SSH...'
+                
+                // 헬스체크 스크립트 생성
+                writeFile file: 'health-check.sh', text: """#!/bin/bash
+set -e
+
+echo "🏥 Starting health check..."
+
+MAX_RETRIES=30
+RETRY_COUNT=0
+HEALTH_URL="http://localhost:8080/actuator/health"
+FALLBACK_URL="http://localhost:8080/"
+
+while [ \$RETRY_COUNT -lt \$MAX_RETRIES ]; do
+    echo "⏳ Health check attempt \$((\$RETRY_COUNT + 1))/\$MAX_RETRIES..."
+    
+    # 컨테이너 상태 확인
+    if ! docker ps | grep -q todo-app-container; then
+        echo "❌ Container is not running!"
+        docker ps -a | grep todo-app-container || echo "Container not found"
+        exit 1
+    fi
+    
+    # Health endpoint 확인
+    if curl -f -s \$HEALTH_URL > /dev/null 2>&1; then
+        echo "✅ Health check passed!"
+        echo "📊 Health check response:"
+        curl -s \$HEALTH_URL | jq . 2>/dev/null || curl -s \$HEALTH_URL
+        exit 0
+    elif curl -f -s \$FALLBACK_URL > /dev/null 2>&1; then
+        echo "✅ Fallback health check passed!"
+        echo "📊 Application is responding on root endpoint"
+        exit 0
+    else
+        RETRY_COUNT=\$((\$RETRY_COUNT + 1))
+        echo "⚠️ Health check failed, retrying in 10 seconds..."
+        sleep 10
+    fi
+done
+
+echo "❌ Health check failed after \$MAX_RETRIES attempts"
+echo "📋 Container logs (last 50 lines):"
+docker logs --tail 50 todo-app-container || echo "Failed to get container logs"
+
+echo "📋 Container status:"
+docker ps -a | grep todo-app-container || echo "Container not found"
+
+exit 1
+"""
+                
+                // Publish over SSH로 헬스체크 실행
+                sshPublisher(
+                    publishers: [
+                        sshPublisherDesc(
+                            configName: env.APP_SERVER_NAME,
+                            verbose: true,
+                            transfers: [
+                                sshTransfer(
+                                    sourceFiles: 'health-check.sh',
+                                    removePrefix: '',
+                                    remoteDirectory: '',
+                                    execCommand: 'chmod +x health-check.sh && ./health-check.sh'
+                                )
+                            ]
+                        )
+                    ]
+                )
+            }
+        }
+        
+        stage('Final Status') {
+            steps {
+                echo 'Getting final deployment status...'
+                sshPublisher(
+                    publishers: [
+                        sshPublisherDesc(
+                            configName: env.APP_SERVER_NAME,
+                            transfers: [
+                                sshTransfer(
+                                    execCommand: '''
+                                        echo "=== 최종 배포 상태 ==="
+                                        echo "📋 실행 중인 컨테이너:"
+                                        docker ps | grep todo-app-container
+                                        
+                                        echo "🔍 컨테이너 세부 정보:"
+                                        docker inspect todo-app-container --format='{{.State.Status}} {{.State.Health.Status}} {{.RestartCount}}'
+                                        
+                                        echo "📊 시스템 리소스 사용량:"
+                                        docker stats --no-stream todo-app-container
+                                        
+                                        echo "🌐 네트워크 포트 확인:"
+                                        netstat -tlnp | grep :8080 || echo "Port 8080 not found in netstat"
+                                        
+                                        echo "✅ 배포 완료! 애플리케이션 URL: http://$(curl -s ifconfig.me):8080"
+                                    '''
+                                )
+                            ]
+                        )
+                    ]
+                )
             }
         }
     }
@@ -169,30 +379,82 @@ pipeline {
         always {
             echo 'Pipeline execution completed.'
             
-            // 로컬 Docker 이미지 정리 (옵션)
-            sh 'docker system prune -f'
+            // 로컬 Docker 이미지 정리 (안전한 에러 처리)
+            script {
+                try {
+                    sh 'docker system prune -f'
+                    echo '✅ Docker cleanup completed successfully'
+                } catch (Exception e) {
+                    echo "⚠️ Docker cleanup failed (this is not critical): ${e.getMessage()}"
+                }
+            }
+            
+            // 생성된 스크립트 파일 정리
+            script {
+                try {
+                    sh 'rm -f deploy.sh health-check.sh'
+                    echo '✅ Script files cleaned up'
+                } catch (Exception e) {
+                    echo "⚠️ Script cleanup failed: ${e.getMessage()}"
+                }
+            }
         }
         
         success {
             echo '🎉 Deployment successful!'
-            
-            // 성공 알림 (Slack, 이메일 등)
-            // slackSend(
-            //     channel: '#deployments',
-            //     color: 'good',
-            //     message: "✅ Deployment successful: ${env.JOB_NAME} #${env.BUILD_NUMBER}"
-            // )
+            echo "✅ Application URL: http://${APP_SERVER_IP}:8080"
+            echo "🐳 Docker Image: ${env.DOCKER_IMAGE_LATEST}"
         }
         
         failure {
             echo '❌ Deployment failed!'
             
-            // 실패 알림
-            // slackSend(
-            //     channel: '#deployments',
-            //     color: 'danger',
-            //     message: "❌ Deployment failed: ${env.JOB_NAME} #${env.BUILD_NUMBER}"
-            // )
+            // 실패 시 로그 수집 (Publish over SSH 방식)
+            script {
+                try {
+                    writeFile file: 'debug.sh', text: '''#!/bin/bash
+echo "=== 디버깅 정보 수집 ==="
+
+echo "📋 모든 Docker 컨테이너 상태:"
+docker ps -a
+
+echo "📋 Docker 이미지 목록:"
+docker images | head -10
+
+echo "📋 시스템 디스크 사용량:"
+df -h
+
+echo "📋 메모리 사용량:"
+free -h
+
+echo "📋 todo-app-container 로그 (마지막 100줄):"
+docker logs --tail 100 todo-app-container 2>/dev/null || echo "No container logs available"
+
+echo "📋 시스템 로그 (마지막 20줄):"
+sudo journalctl --no-pager -n 20
+
+echo "=== 디버깅 정보 수집 완료 ==="
+'''
+                    
+                    sshPublisher(
+                        publishers: [
+                            sshPublisherDesc(
+                                configName: env.APP_SERVER_NAME,
+                                transfers: [
+                                    sshTransfer(
+                                        sourceFiles: 'debug.sh',
+                                        removePrefix: '',
+                                        remoteDirectory: '',
+                                        execCommand: 'chmod +x debug.sh && ./debug.sh'
+                                    )
+                                ]
+                            )
+                        ]
+                    )
+                } catch (Exception e) {
+                    echo "디버깅 정보 수집 실패: ${e.getMessage()}"
+                }
+            }
         }
         
         cleanup {
